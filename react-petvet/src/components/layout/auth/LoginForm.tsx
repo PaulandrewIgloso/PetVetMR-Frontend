@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { ArrowRight, PawPrint } from "lucide-react"
+import { ArrowRight, PawPrint, Eye, EyeOff } from "lucide-react"
 import catHero from "@/assets/CatDog.jpg"
 import { useAuth } from "@/services/auth/auth.service"
 import { SELF_REGISTER_ROLE_ID } from "@/services/auth/auth.types"
@@ -19,6 +19,7 @@ export function LoginForm() {
   const [fullName, setFullName] = useState("")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
 
@@ -26,6 +27,7 @@ export function LoginForm() {
     setMode(next)
     setError("")
     setPassword("")
+    setShowPassword(false)
   }
 
   const handleSignIn = async (e: React.FormEvent) => {
@@ -148,15 +150,25 @@ export function LoginForm() {
                 >
                   Password
                 </Label>
-                <Input
-                  id="password"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="******"
-                  className="h-14 rounded-2xl border-0 bg-white px-5 text-base shadow-sm ring-0 focus-visible:ring-2 focus-visible:ring-teal-500/40"
-                />
+                <div className="relative">
+                  <Input
+                    id="password"
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="******"
+                    className="h-14 rounded-2xl border-0 bg-white px-5 pr-12 text-base shadow-sm ring-0 focus-visible:ring-2 focus-visible:ring-teal-500/40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                  </button>
+                </div>
               </div>
 
               <Button
@@ -233,15 +245,25 @@ export function LoginForm() {
                 >
                   Password
                 </Label>
-                <Input
-                  id="regPassword"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="h-14 rounded-2xl border-0 bg-white px-5 text-base shadow-sm ring-0 focus-visible:ring-2 focus-visible:ring-teal-500/40"
-                />
+                <div className="relative">
+                  <Input
+                    id="regPassword"
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="h-14 rounded-2xl border-0 bg-white px-5 pr-12 text-base shadow-sm ring-0 focus-visible:ring-2 focus-visible:ring-teal-500/40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                  </button>
+                </div>
               </div>
 
               <Button

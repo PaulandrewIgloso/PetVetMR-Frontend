@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { AppShell } from "@/components/layout/Appshell"
-import { Plus, X } from "lucide-react"
+import { Plus, X, Search } from "lucide-react"
 import { PetAvatar } from "@/components/shared/PetAvatar"
 import { Collapsible } from "@/components/ui/collapsible"
 import { vaccinationsService } from "@/services/vaccinations/vaccinations.service"
@@ -48,6 +48,7 @@ export default function VaccinationsPage() {
   const [pets, setPets] = useState<PetReadDto[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
+  const [query, setQuery] = useState("")
 
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [form, setForm] = useState(emptyForm)
@@ -98,6 +99,16 @@ export default function VaccinationsPage() {
     return map
   }, [pets])
 
+  const filteredVaccinations = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return vaccinations
+    return vaccinations.filter((v) =>
+      [v.petName, v.vaccineType, v.batchNumber, v.administeredByName]
+        .filter(Boolean)
+        .some((field) => field!.toLowerCase().includes(q))
+    )
+  }, [vaccinations, query])
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!form.petID || !form.vaccineType.trim() || !form.vaccinationDate) return
@@ -132,17 +143,27 @@ export default function VaccinationsPage() {
   return (
     <AppShell>
       <div className="space-y-4 p-4 sm:p-6 lg:p-8">
-        {isAdmin && (
-          <div className="flex justify-end">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="relative max-w-md flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by pet, vaccine, batch no..."
+              className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 text-sm shadow-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+            />
+          </div>
+          {isAdmin && (
             <button
               onClick={() => setIsModalOpen(true)}
-              className="flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-teal-700 via-teal-600 to-green-500 px-4 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+              className="flex h-11 shrink-0 items-center gap-2 rounded-xl bg-gradient-to-r from-teal-700 via-teal-600 to-green-500 px-4 text-sm font-semibold text-white shadow-sm hover:opacity-90"
             >
               <Plus className="h-4 w-4" />
               Record Vaccination
             </button>
-          </div>
-        )}
+          )}
+        </div>
 
         {isLoading && <p className="text-sm text-slate-500">Loading vaccinations...</p>}
 
@@ -168,7 +189,7 @@ export default function VaccinationsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {vaccinations.map((v) => {
+                {filteredVaccinations.map((v) => {
                   const status = getStatus(v.nextDueDate)
                   return (
                     <tr key={v.vaccinationID}>
@@ -209,7 +230,7 @@ export default function VaccinationsPage() {
 
             {/* Mobile: accordion cards */}
             <div className="divide-y md:hidden">
-              {vaccinations.map((v) => {
+              {filteredVaccinations.map((v) => {
                 const status = getStatus(v.nextDueDate)
                 return (
                   <Collapsible
@@ -260,6 +281,9 @@ export default function VaccinationsPage() {
 
             {vaccinations.length === 0 && (
               <p className="p-6 text-sm text-slate-500">No vaccination records yet.</p>
+            )}
+            {vaccinations.length > 0 && filteredVaccinations.length === 0 && (
+              <p className="p-6 text-sm text-slate-500">No vaccinations match "{query}".</p>
             )}
           </div>
         )}

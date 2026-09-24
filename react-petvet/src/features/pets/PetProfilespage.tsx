@@ -27,7 +27,31 @@ function formatAge(dateOfBirth: string | null): string {
     const months = (now.getFullYear() - dob.getFullYear()) * 12 + (now.getMonth() - dob.getMonth())
     return `${Math.max(months, 0)} mo`
   }
+  if (years > 40) return "—" 
   return years === 1 ? "1 yr" : `${years} yrs`
+}
+
+function getDobBounds() {
+  const today = new Date()
+  const max = today.toISOString().split("T")[0]
+  const earliest = new Date(today.getFullYear() - 30, today.getMonth(), today.getDate())
+  const min = earliest.toISOString().split("T")[0]
+  return { min, max }
+}
+
+function validateDateOfBirth(species: string, dateOfBirth: string): string | null {
+  if (!dateOfBirth) return null
+  const dob = new Date(dateOfBirth)
+  const now = new Date()
+  if (isNaN(dob.getTime())) return "Please enter a valid date of birth."
+  if (dob > now) return "Date of birth can't be in the future."
+
+  const ageYears = (now.getTime() - dob.getTime()) / (1000 * 60 * 60 * 24 * 365.25)
+  const maxAge = species === "Dog" || species === "Cat" ? 25 : 40 
+  if (ageYears > maxAge) {
+    return `That date implies a ${Math.round(ageYears)}-year-old ${species.toLowerCase()}, which isn't realistic. Please double-check it.`
+  }
+  return null
 }
 
 function formatGender(gender: string | null): string {
@@ -65,6 +89,7 @@ export default function PetProfilesPage() {
   const [loadError, setLoadError] = useState("")
   const [saveError, setSaveError] = useState("")
   const [isSaving, setIsSaving] = useState(false)
+  const { min: minDob, max: maxDob } = getDobBounds()
 
   useEffect(() => {
     let cancelled = false
@@ -114,6 +139,12 @@ export default function PetProfilesPage() {
     e.preventDefault()
     if (!form.name.trim()) return
     if (isAdmin && !form.ownerUserID) return
+
+    const dobError = validateDateOfBirth(form.species, form.dateOfBirth)
+    if (dobError) {
+      setSaveError(dobError)
+      return
+    }
 
     setIsSaving(true)
     setSaveError("")
@@ -299,6 +330,8 @@ export default function PetProfilesPage() {
                   </label>
                   <input
                     type="date"
+                    min={minDob}
+                    max={maxDob}
                     value={form.dateOfBirth}
                     onChange={(e) => setForm({ ...form, dateOfBirth: e.target.value })}
                     className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"

@@ -2434,7 +2434,7 @@ export default function AppointmentsPage() {
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
           <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white shadow-xl scrollbar-hide">
-            <div className="sticky top-0 flex items-center justify-between bg-gradient-to-r from-slate-900 to-teal-800 px-6 py-4">
+            <div className="sticky top-0 z-20 flex items-center justify-between bg-gradient-to-r from-slate-900 to-teal-800 px-6 py-4">
               <h2 className="font-semibold text-white">Book Appointment</h2>
               <button onClick={closeModal} className="text-white/80 hover:text-white">
                 <X className="h-5 w-5" />
