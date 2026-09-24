@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { AppShell } from "@/components/layout/Appshell"
-import { Search, Plus, X } from "lucide-react"
+import { Plus, X, CheckCircle, Ban, UserX } from "lucide-react"
+import { PetAvatar } from "@/components/shared/PetAvatar"
+import { appointmentsService } from "@/services/appointments/appointments.service"
+import type { AppointmentReadDto, AppointmentCreateDto, AppointmentUpdateDto } from "@/services/appointments/appointments.dtos"
 import { petsService } from "@/services/pets/pets.service"
 import type { PetReadDto, PetCreateDto } from "@/services/pets/pets.dtos"
 import { usersService } from "@/services/users/users.service"
 import type { UserReadDto } from "@/services/users/users.dtos"
 import { useAuth } from "@/services/auth/auth.service"
-import { PetAvatar } from "@/components/shared/PetAvatar"
 
 const avatarColors = ["bg-orange-200", "bg-slate-300", "bg-amber-300", "bg-yellow-200", "bg-slate-500", "bg-emerald-200", "bg-sky-200"]
 
@@ -14,22 +16,32 @@ function colorForId(id: number) {
   return avatarColors[id % avatarColors.length]
 }
 
-function formatAge(dateOfBirth: string | null): string {
-  if (!dateOfBirth) return "—"
-  const dob = new Date(dateOfBirth)
-  const now = new Date()
-  let years = now.getFullYear() - dob.getFullYear()
-  const monthDiff = now.getMonth() - dob.getMonth()
-  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < dob.getDate())) {
-    years--
-  }
-  if (years < 1) {
-    const months = (now.getFullYear() - dob.getFullYear()) * 12 + (now.getMonth() - dob.getMonth())
-    return `${Math.max(months, 0)} mo`
-  }
-  if (years > 40) return "—" // implausible legacy data; treat as unknown rather than showing a nonsense age
-  return years === 1 ? "1 yr" : `${years} yrs`
+function userDisplayName(user: UserReadDto): string {
+  const full = [user.firstName, user.lastName].filter(Boolean).join(" ")
+  return full || user.username
 }
+
+function formatDateBox(iso: string) {
+  const d = new Date(iso)
+  return {
+    day: d.toLocaleDateString("en-US", { day: "2-digit" }),
+    month: d.toLocaleDateString("en-US", { month: "short" }),
+  }
+}
+
+function formatTime(iso: string) {
+  return new Date(iso).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
+}
+
+const emptyForm = {
+  petID: "",
+  date: "",
+  time: "09:00",
+  reason: "",
+  veterinarianUserID: "",
+}
+
+const SPECIES_OPTIONS = ["Dog", "Cat", "Bird", "Rabbit", "Reptile", "Other"]
 
 function getDobBounds() {
   const today = new Date()
@@ -54,19 +66,12 @@ function validateDateOfBirth(species: string, dateOfBirth: string): string | nul
   return null
 }
 
-function formatGender(gender: string | null): string {
-  if (gender === "M") return "Male"
-  if (gender === "F") return "Female"
-  if (gender === "N") return "Neutered"
-  return "Unknown"
-}
+const GENDER_OPTIONS = [
+  { value: "M", label: "Male" },
+  { value: "F", label: "Female" },
+]
 
-function ownerDisplayName(user: UserReadDto): string {
-  const full = [user.firstName, user.lastName].filter(Boolean).join(" ")
-  return full || user.username
-}
-
-const emptyForm = {
+const emptyNewPetForm = {
   name: "",
   species: "Dog",
   breed: "",
@@ -77,18 +82,25 @@ const emptyForm = {
   ownerUserID: "",
 }
 
-export default function PetProfilesPage() {
+export default function AppointmentsPage() {
   const { isAdmin } = useAuth()
+
+  const [appointments, setAppointments] = useState<AppointmentReadDto[]>([])
   const [pets, setPets] = useState<PetReadDto[]>([])
   const [users, setUsers] = useState<UserReadDto[]>([])
-  const [query, setQuery] = useState("")
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const [form, setForm] = useState(emptyForm)
-  const [photo, setPhoto] = useState<File | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
-  const [saveError, setSaveError] = useState("")
+
+  const [activeTab, setActiveTab] = useState<"Scheduled" | "Completed" | "Cancelled" | "NoShow">("Scheduled")
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [form, setForm] = useState(emptyForm)
   const [isSaving, setIsSaving] = useState(false)
+  const [saveError, setSaveError] = useState("")
+  const [updatingId, setUpdatingId] = useState<number | null>(null)
+
+  const [petMode, setPetMode] = useState<"existing" | "new">("existing")
+  const [newPetForm, setNewPetForm] = useState(emptyNewPetForm)
+  const [newPetPhoto, setNewPetPhoto] = useState<File | null>(null)
   const { min: minDob, max: maxDob } = getDobBounds()
 
   useEffect(() => {
@@ -97,21 +109,33 @@ export default function PetProfilesPage() {
       setIsLoading(true)
       setLoadError("")
       try {
-        const petsData = await petsService.getAll()
-        if (!cancelled) setPets(petsData)
+        // Users/GetAll is Admin-only on the backend, so non-admins would
+        // always get a 403 here. Only request it when it can succeed —
+        // non-admins never see the veterinarian picker anyway (it only
+        // appears in the admin-only Book Appointment modal below).
+        const [appointmentsResult, petsResult, usersResult] = await Promise.allSettled([
+          appointmentsService.getAll(),
+          petsService.getAll(),
+          isAdmin ? usersService.getAll() : Promise.resolve<UserReadDto[]>([]),
+        ])
 
-        try {
-          const usersData = await usersService.getAll()
-          if (!cancelled) setUsers(usersData)
-        } catch {
-          if (!cancelled) setUsers([])
-        }
+        if (cancelled) return
+
+        // Appointments and pets are required for the page to render at all.
+        if (appointmentsResult.status === "rejected") throw appointmentsResult.reason
+        if (petsResult.status === "rejected") throw petsResult.reason
+
+        setAppointments(appointmentsResult.value)
+        setPets(petsResult.value)
+        // Users list is auxiliary (only used for the vet picker) — fall
+        // back to an empty list instead of blocking the whole page.
+        setUsers(usersResult.status === "fulfilled" ? usersResult.value : [])
       } catch (err) {
         if (!cancelled) {
           const message =
             typeof err === "object" && err && "message" in err
               ? String((err as { message: unknown }).message)
-              : "Failed to load pets."
+              : "Failed to load appointments."
           setLoadError(message)
         }
       } finally {
@@ -122,83 +146,186 @@ export default function PetProfilesPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [isAdmin])
 
-  const filteredPets = pets.filter((pet) =>
-    pet.name.toLowerCase().includes(query.toLowerCase())
+  const ownerNameByPetId = useMemo(() => {
+    const map = new Map<number, string>()
+    pets.forEach((p) => map.set(p.petID, p.ownerName ?? "—"))
+    return map
+  }, [pets])
+
+  const hasPhotoByPetId = useMemo(() => {
+    const map = new Map<number, boolean>()
+    pets.forEach((p) => map.set(p.petID, !!p.photoPath))
+    return map
+  }, [pets])
+
+  const veterinarianOptions = useMemo(
+    () => users.filter((u) => u.roleName === "Admin"),
+    [users]
   )
+
+  const ownerOptions = useMemo(
+    () => users.filter((u) => u.roleName === "PetOwner"),
+    [users]
+  )
+
+  const visibleAppointments = appointments
+    .filter((a) => a.status === activeTab)
+    .sort((a, b) => a.appointmentDateTime.localeCompare(b.appointmentDateTime))
 
   const closeModal = () => {
     setIsModalOpen(false)
     setForm(emptyForm)
-    setPhoto(null)
     setSaveError("")
+    setPetMode("existing")
+    setNewPetForm(emptyNewPetForm)
+    setNewPetPhoto(null)
   }
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!form.name.trim()) return
-    if (isAdmin && !form.ownerUserID) return
+    if (!form.date || !form.time) return
+    if (petMode === "existing" && !form.petID) return
+    if (petMode === "new" && !newPetForm.name.trim()) return
 
-    const dobError = validateDateOfBirth(form.species, form.dateOfBirth)
-    if (dobError) {
-      setSaveError(dobError)
-      return
+    if (petMode === "new") {
+      const dobError = validateDateOfBirth(newPetForm.species, newPetForm.dateOfBirth)
+      if (dobError) {
+        setSaveError(dobError)
+        return
+      }
     }
 
     setIsSaving(true)
     setSaveError("")
     try {
-      const payload: PetCreateDto = {
-        name: form.name.trim(),
-        species: form.species,
-        breed: form.breed.trim() || undefined,
-        dateOfBirth: form.dateOfBirth || null,
-        gender: form.gender || null,
-        color: form.color.trim() || undefined,
-        microchipID: form.microchipID.trim() || undefined,
-        ownerUserID: isAdmin ? Number(form.ownerUserID) : undefined,
+      let petID: number
+
+      if (petMode === "new") {
+        const petPayload: PetCreateDto = {
+          name: newPetForm.name.trim(),
+          species: newPetForm.species,
+          breed: newPetForm.breed.trim() || undefined,
+          dateOfBirth: newPetForm.dateOfBirth || undefined,
+          gender: newPetForm.gender || undefined,
+          color: newPetForm.color.trim() || undefined,
+          microchipID: newPetForm.microchipID.trim() || undefined,
+          ownerUserID: isAdmin && newPetForm.ownerUserID ? Number(newPetForm.ownerUserID) : undefined,
+        }
+        const createdPet = await petsService.create(petPayload, newPetPhoto)
+        setPets((prev) => [...prev, createdPet])
+        petID = createdPet.petID
+      } else {
+        petID = Number(form.petID)
       }
-      const created = await petsService.create(payload, photo)
-      setPets((prev) => [created, ...prev])
+
+      const payload: AppointmentCreateDto = {
+        petID,
+        appointmentDateTime: `${form.date}T${form.time}:00`,
+        reason: form.reason.trim() || undefined,
+        veterinarianUserID: form.veterinarianUserID ? Number(form.veterinarianUserID) : null,
+      }
+      const created = await appointmentsService.create(payload)
+      setAppointments((prev) => [...prev, created])
+      setActiveTab("Scheduled")
       closeModal()
     } catch (err) {
       const message =
         typeof err === "object" && err && "message" in err
           ? String((err as { message: unknown }).message)
-          : "Could not save pet."
+          : petMode === "new"
+          ? "Could not add pet."
+          : "Could not book appointment."
       setSaveError(message)
     } finally {
       setIsSaving(false)
     }
   }
 
+  const handleUpdateStatus = async (
+    a: AppointmentReadDto,
+    status: AppointmentUpdateDto["status"]
+  ) => {
+    setUpdatingId(a.appointmentID)
+    try {
+      const payload: AppointmentUpdateDto = {
+        appointmentDateTime: a.appointmentDateTime,
+        reason: a.reason ?? undefined,
+        status,
+        veterinarianUserID: a.veterinarianUserID,
+        notes: a.notes ?? undefined,
+      }
+      const updated = await appointmentsService.update(a.appointmentID, payload)
+      setAppointments((prev) =>
+        prev.map((item) => (item.appointmentID === updated.appointmentID ? updated : item))
+      )
+    } catch (err) {
+      const message =
+        typeof err === "object" && err && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "Could not update appointment."
+      alert(message)
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  const handleAssignVet = async (a: AppointmentReadDto, vetId: string) => {
+    setUpdatingId(a.appointmentID)
+    try {
+      const payload: AppointmentUpdateDto = {
+        appointmentDateTime: a.appointmentDateTime,
+        reason: a.reason ?? undefined,
+        status: a.status,
+        veterinarianUserID: vetId ? Number(vetId) : null,
+        notes: a.notes ?? undefined,
+      }
+      const updated = await appointmentsService.update(a.appointmentID, payload)
+      setAppointments((prev) =>
+        prev.map((item) => (item.appointmentID === updated.appointmentID ? updated : item))
+      )
+    } catch (err) {
+      const message =
+        typeof err === "object" && err && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "Could not assign veterinarian."
+      alert(message)
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
   return (
     <AppShell>
-      <div className="space-y-6 p-4 sm:p-6 lg:p-8">
-
-        {/* Search + Add */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <div className="relative max-w-md flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search pets..."
-              className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 text-sm shadow-sm outline-none focus:ring-2 focus:ring-teal-500/40"
-            />
+      <div className="space-y-4 p-4 sm:p-6 lg:p-8">
+        {/* Tabs + Book button */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex gap-2 overflow-x-auto rounded-lg border border-slate-200 bg-white p-1">
+            {(["Scheduled", "Completed", "Cancelled", "NoShow"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`shrink-0 rounded-md px-4 py-1.5 text-sm font-semibold transition-colors ${
+                  activeTab === tab
+                    ? "bg-gradient-to-r from-teal-700 to-teal-600 text-white shadow-sm"
+                    : "text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {tab === "NoShow" ? "No-Show" : tab}
+              </button>
+            ))}
           </div>
           <button
             onClick={() => setIsModalOpen(true)}
-            className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-teal-700 via-teal-600 to-green-500 px-4 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+            className="flex h-11 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-teal-700 via-teal-600 to-green-500 px-4 text-sm font-semibold text-white shadow-sm hover:opacity-90"
           >
             <Plus className="h-4 w-4" />
-            Add Pet
+            Book Appointment
           </button>
         </div>
 
-        {isLoading && <p className="text-sm text-slate-500">Loading pets...</p>}
+        {isLoading && <p className="text-sm text-slate-500">Loading appointments...</p>}
 
         {loadError && !isLoading && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -206,68 +333,118 @@ export default function PetProfilesPage() {
           </div>
         )}
 
-        {/* Pet cards grid */}
+        {/* Appointment cards */}
         {!isLoading && !loadError && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredPets.map((pet) => (
-              <div key={pet.petID} className="rounded-2xl border bg-white p-5 shadow-sm">
-                <div className="mb-4 flex items-start justify-between">
-                  <div className="flex items-center gap-3">
+          <div className="space-y-3">
+            {visibleAppointments.map((a) => {
+              const { day, month } = formatDateBox(a.appointmentDateTime)
+              return (
+                <div
+                  key={a.appointmentID}
+                  className="flex flex-col gap-4 rounded-2xl border bg-white px-4 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:px-5"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="flex w-14 shrink-0 flex-col items-center rounded-lg bg-teal-50 py-1.5">
+                      <span className="text-lg font-bold leading-tight text-teal-700">{day}</span>
+                      <span className="text-xs font-medium uppercase text-teal-500">{month}</span>
+                    </div>
                     <PetAvatar
-                      petID={pet.petID}
-                      hasPhoto={!!pet.photoPath}
-                      colorClassName={colorForId(pet.petID)}
+                      petID={a.petID}
+                      hasPhoto={hasPhotoByPetId.get(a.petID) ?? false}
+                      colorClassName={colorForId(a.petID)}
+                      className="h-10 w-10 shrink-0 rounded-full object-cover"
                     />
-                    <div>
-                      <div className="font-semibold text-slate-900">{pet.name}</div>
-                      <div className="text-xs text-teal-600">{pet.breed || "Unknown breed"}</div>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-slate-900">
+                        {a.petName ?? "—"} <span className="font-normal text-slate-400">—</span>{" "}
+                        <span className="font-normal text-teal-600">{ownerNameByPetId.get(a.petID) ?? "—"}</span>
+                      </div>
+                      <div className="truncate text-xs text-slate-500">{a.reason ?? "General visit"}</div>
                     </div>
                   </div>
-                  <span
-                    className={`rounded-md px-2 py-1 text-xs font-medium ${
-                      pet.species === "Dog"
-                        ? "bg-sky-100 text-sky-700"
-                        : pet.species === "Cat"
-                        ? "bg-purple-100 text-purple-700"
-                        : "bg-slate-100 text-slate-600"
-                    }`}
-                  >
-                    {pet.species}
-                  </span>
-                </div>
-
-                <div className="mb-3 grid grid-cols-2 gap-2">
-                  <div className="rounded-lg bg-slate-100 py-2 text-center">
-                    <div className="text-sm font-semibold text-slate-900">{formatAge(pet.dateOfBirth)}</div>
-                    <div className="text-[11px] text-slate-500">Age</div>
+                  <div className="flex flex-wrap items-center gap-3 sm:justify-end sm:gap-4">
+                    <div className="sm:text-right">
+                      <div className="text-sm font-semibold text-slate-900">{formatTime(a.appointmentDateTime)}</div>
+                      {isAdmin ? (
+                        <select
+                          value={a.veterinarianUserID ?? ""}
+                          onChange={(e) => handleAssignVet(a, e.target.value)}
+                          disabled={updatingId === a.appointmentID}
+                          className="mt-0.5 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-xs font-medium text-teal-700 outline-none focus:ring-2 focus:ring-teal-500/40 disabled:opacity-60"
+                        >
+                          <option value="">Unassigned</option>
+                          {veterinarianOptions.map((u) => (
+                            <option key={u.userID} value={u.userID}>{userDisplayName(u)}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="text-xs text-teal-600">{a.veterinarianName ?? "Unassigned"}</div>
+                      )}
+                    </div>
+                    <span
+                      className={`rounded-md border px-3 py-1 text-xs font-medium ${
+                        a.status === "Scheduled"
+                          ? "border-sky-200 bg-sky-50 text-sky-700"
+                          : a.status === "Completed"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                          : a.status === "Cancelled"
+                          ? "border-red-200 bg-red-50 text-red-700"
+                          : "border-slate-200 bg-slate-50 text-slate-600"
+                      }`}
+                    >
+                      {a.status === "NoShow" ? "No-Show" : a.status}
+                    </span>
+                    {isAdmin && a.status === "Scheduled" && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => handleUpdateStatus(a, "Completed")}
+                          disabled={updatingId === a.appointmentID}
+                          title="Mark Completed"
+                          className="flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
+                        >
+                          <CheckCircle className="h-3.5 w-3.5" />
+                          Complete
+                        </button>
+                        <button
+                          onClick={() => handleUpdateStatus(a, "NoShow")}
+                          disabled={updatingId === a.appointmentID}
+                          title="Mark No-Show"
+                          className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-60"
+                        >
+                          <UserX className="h-3.5 w-3.5" />
+                          No-Show
+                        </button>
+                        <button
+                          onClick={() => handleUpdateStatus(a, "Cancelled")}
+                          disabled={updatingId === a.appointmentID}
+                          title="Cancel Appointment"
+                          className="flex items-center gap-1.5 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-60"
+                        >
+                          <Ban className="h-3.5 w-3.5" />
+                          Cancel
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <div className="rounded-lg bg-slate-100 py-2 text-center">
-                    <div className="text-sm font-semibold text-slate-900">{formatGender(pet.gender)}</div>
-                    <div className="text-[11px] text-slate-500">Gender</div>
-                  </div>
                 </div>
+              )
+            })}
 
-                <div className="text-xs text-slate-500">
-                  Owner: <span className="text-slate-700">{pet.ownerName || "—"}</span>
-                </div>
-              </div>
-            ))}
+            {visibleAppointments.length === 0 && (
+              <p className="rounded-2xl border bg-white p-6 text-sm text-slate-500">
+                No {activeTab === "NoShow" ? "no-show" : activeTab.toLowerCase()} appointments.
+              </p>
+            )}
           </div>
-        )}
-
-        {!isLoading && !loadError && filteredPets.length === 0 && (
-          <p className="text-sm text-slate-500">
-            {pets.length === 0 ? "No pets registered yet." : `No pets match "${query}".`}
-          </p>
         )}
       </div>
 
-      {/* Add Pet Modal */}
+      {/* Book Appointment Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
           <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white shadow-xl scrollbar-hide">
-            <div className="sticky top-0 flex items-center justify-between bg-gradient-to-r from-slate-900 to-teal-800 px-6 py-4">
-              <h2 className="font-semibold text-white">Add New Pet</h2>
+            <div className="sticky top-0 z-20 flex items-center justify-between bg-gradient-to-r from-slate-900 to-teal-800 px-6 py-4">
+              <h2 className="font-semibold text-white">Book Appointment</h2>
               <button onClick={closeModal} className="text-white/80 hover:text-white">
                 <X className="h-5 w-5" />
               </button>
@@ -280,139 +457,198 @@ export default function PetProfilesPage() {
                 </div>
               )}
 
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Pet Name
+                  Pet
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder="e.g. Buddy"
-                  className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
-                />
-              </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Species
-                  </label>
+                {/* Sliding toggle between "Select Existing" and "Add New Pet" */}
+                <div className="relative grid grid-cols-2 rounded-lg border border-slate-200 bg-slate-100 p-1">
+                  <span
+                    className="absolute inset-y-1 left-1 w-[calc(50%-4px)] rounded-md bg-white shadow-sm transition-transform duration-200 ease-out"
+                    style={{ transform: petMode === "new" ? "translateX(100%)" : "translateX(0)" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPetMode("existing")}
+                    className={`relative z-10 rounded-md py-1.5 text-xs font-semibold transition-colors ${
+                      petMode === "existing" ? "text-teal-700" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    Select Existing
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPetMode("new")}
+                    className={`relative z-10 rounded-md py-1.5 text-xs font-semibold transition-colors ${
+                      petMode === "new" ? "text-teal-700" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    Add New Pet
+                  </button>
+                </div>
+
+                {petMode === "existing" ? (
                   <select
-                    value={form.species}
-                    onChange={(e) => setForm({ ...form, species: e.target.value })}
+                    required
+                    value={form.petID}
+                    onChange={(e) => setForm({ ...form, petID: e.target.value })}
                     className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
                   >
-                    <option value="Dog">Dog</option>
-                    <option value="Cat">Cat</option>
-                    <option value="Other">Other</option>
+                    <option value="">— Select pet —</option>
+                    {pets.map((p) => (
+                      <option key={p.petID} value={p.petID}>{p.name}</option>
+                    ))}
                   </select>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Breed
-                  </label>
-                  <input
-                    type="text"
-                    value={form.breed}
-                    onChange={(e) => setForm({ ...form, breed: e.target.value })}
-                    placeholder="e.g. Labrador"
-                    className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
-                  />
-                </div>
+                ) : (
+                  <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                    <input
+                      type="text"
+                      required
+                      value={newPetForm.name}
+                      onChange={(e) => setNewPetForm({ ...newPetForm, name: e.target.value })}
+                      placeholder="Pet name"
+                      className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                    />
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <select
+                        value={newPetForm.species}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, species: e.target.value })}
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      >
+                        {SPECIES_OPTIONS.map((s) => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        value={newPetForm.breed}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, breed: e.target.value })}
+                        placeholder="Breed"
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <input
+                        type="date"
+                        min={minDob}
+                        max={maxDob}
+                        value={newPetForm.dateOfBirth}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, dateOfBirth: e.target.value })}
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      />
+                      <select
+                        value={newPetForm.gender}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, gender: e.target.value })}
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      >
+                        {GENDER_OPTIONS.map((g) => (
+                          <option key={g.value} value={g.value}>{g.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        value={newPetForm.color}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, color: e.target.value })}
+                        placeholder="Color"
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      />
+                      <input
+                        type="text"
+                        value={newPetForm.microchipID}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, microchipID: e.target.value })}
+                        placeholder="Microchip ID (optional)"
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      />
+                    </div>
+
+                    {isAdmin && (
+                      <select
+                        value={newPetForm.ownerUserID}
+                        onChange={(e) => setNewPetForm({ ...newPetForm, ownerUserID: e.target.value })}
+                        className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                      >
+                        <option value="">— Select owner —</option>
+                        {ownerOptions.map((u) => (
+                          <option key={u.userID} value={u.userID}>{userDisplayName(u)}</option>
+                        ))}
+                      </select>
+                    )}
+
+                    <div className="flex items-center gap-2 text-sm">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => setNewPetPhoto(e.target.files?.[0] ?? null)}
+                        className="text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-teal-50 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-teal-700 hover:file:bg-teal-100"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Date of Birth
+                    Date
                   </label>
                   <input
                     type="date"
-                    min={minDob}
-                    max={maxDob}
-                    value={form.dateOfBirth}
-                    onChange={(e) => setForm({ ...form, dateOfBirth: e.target.value })}
+                    required
+                    value={form.date}
+                    onChange={(e) => setForm({ ...form, date: e.target.value })}
                     className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
                   />
                 </div>
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Gender
+                    Time
                   </label>
-                  <select
-                    value={form.gender}
-                    onChange={(e) => setForm({ ...form, gender: e.target.value })}
+                  <input
+                    type="time"
+                    required
+                    value={form.time}
+                    onChange={(e) => setForm({ ...form, time: e.target.value })}
                     className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
-                  >
-                    <option value="M">Male</option>
-                    <option value="F">Female</option>
-                    <option value="N">Neutered</option>
-                  </select>
+                  />
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Color
-                  </label>
-                  <input
-                    type="text"
-                    value={form.color}
-                    onChange={(e) => setForm({ ...form, color: e.target.value })}
-                    placeholder="e.g. Golden"
-                    className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Microchip ID
-                  </label>
-                  <input
-                    type="text"
-                    value={form.microchipID}
-                    onChange={(e) => setForm({ ...form, microchipID: e.target.value })}
-                    placeholder="Optional"
-                    className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
-                  />
-                </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Reason for Visit
+                </label>
+                <textarea
+                  value={form.reason}
+                  onChange={(e) => setForm({ ...form, reason: e.target.value })}
+                  placeholder="e.g. Annual wellness check, follow-up..."
+                  rows={2}
+                  className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+                />
               </div>
 
               {isAdmin && (
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Owner
+                    Veterinarian
                   </label>
                   <select
-                    required
-                    value={form.ownerUserID}
-                    onChange={(e) => setForm({ ...form, ownerUserID: e.target.value })}
+                    value={form.veterinarianUserID}
+                    onChange={(e) => setForm({ ...form, veterinarianUserID: e.target.value })}
                     className="h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
                   >
-                    <option value="">— Select owner —</option>
-                    {users.map((u) => (
-                      <option key={u.userID} value={u.userID}>
-                        {ownerDisplayName(u)}
-                      </option>
+                    <option value="">— Unassigned —</option>
+                    {veterinarianOptions.map((u) => (
+                      <option key={u.userID} value={u.userID}>{userDisplayName(u)}</option>
                     ))}
                   </select>
                 </div>
               )}
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Photo
-                </label>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => setPhoto(e.target.files?.[0] ?? null)}
-                  className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-teal-50 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-teal-700 hover:file:bg-teal-100"
-                />
-                {photo && <p className="text-xs text-slate-500">{photo.name}</p>}
-              </div>
 
               <div className="flex gap-3 pt-2">
                 <button
