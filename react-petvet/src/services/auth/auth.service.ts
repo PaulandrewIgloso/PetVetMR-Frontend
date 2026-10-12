@@ -10,8 +10,21 @@ function mapAuthResponseToUser(dto: AuthResponseDto): User {
 }
 const isAdmin = (role: string | null) => role?.toLowerCase() === "admin"
 
+const USER_KEY = "user"
+
+function loadStoredUser(): User | null {
+  // Only restore a user if a token exists, so they can never get out of sync.
+  if (!localStorage.getItem("token")) return null
+  try {
+    const raw = localStorage.getItem(USER_KEY)
+    return raw ? (JSON.parse(raw) as User) : null
+  } catch {
+    return null
+  }
+}
+
 export const AuthProvider = ({ children }: AuthProviderProps) => {
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<User | null>(loadStoredUser)
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("token") ?? null)
 
   const isAdminUser = isAdmin(user?.role ?? null)
@@ -19,9 +32,11 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
   const login = async (email: string, password: string) => {
     const payload: LoginDto = { email, password }
     const data = await api.post<AuthResponseDto>("/api/Auth/login", payload)
+    const mappedUser = mapAuthResponseToUser(data)
     setToken(data.token)
-    setUser(mapAuthResponseToUser(data))
+    setUser(mappedUser)
     localStorage.setItem("token", data.token)
+    localStorage.setItem(USER_KEY, JSON.stringify(mappedUser))
   }
 
   const register = async (payload: UserCreateDto) => {
@@ -32,6 +47,7 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
     setToken(null)
     setUser(null)
     localStorage.removeItem("token")
+    localStorage.removeItem(USER_KEY)
     window.location.href = "/login"
   }
 

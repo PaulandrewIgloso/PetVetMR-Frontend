@@ -7,21 +7,30 @@ import { medicalRecordsService } from "@/services/medicalRecords/medicalRecords.
 import type { MedicalRecordReadDto } from "@/services/medicalRecords/medicalRecords.dtos"
 import { vaccinationsService } from "@/services/vaccinations/vaccinations.service"
 import type { VaccinationReadDto } from "@/services/vaccinations/vaccinations.dtos"
+import { petsService } from "@/services/pets/pets.service"
+import type { PetReadDto } from "@/services/pets/pets.dtos"
 
 interface OwnedPet {
   petID: number
   name: string
 }
 
-function deriveMyPets(
+function buildMyPets(
+  pets: PetReadDto[],
   appointments: AppointmentReadDto[],
   records: MedicalRecordReadDto[],
   vaccinations: VaccinationReadDto[]
 ): OwnedPet[] {
+  // Registered pets are authoritative, so pets with no history still appear.
   const map = new Map<number, string>()
-  appointments.forEach((a) => map.set(a.petID, a.petName ?? `Pet #${a.petID}`))
-  records.forEach((r) => map.set(r.petID, r.petName ?? `Pet #${r.petID}`))
-  vaccinations.forEach((v) => map.set(v.petID, v.petName ?? `Pet #${v.petID}`))
+  pets.forEach((p) => map.set(p.petID, p.name))
+  // Fallback: pets referenced by history but missing from the pets response.
+  const addIfMissing = (petID: number, petName: string | null) => {
+    if (!map.has(petID)) map.set(petID, petName ?? `Pet #${petID}`)
+  }
+  appointments.forEach((a) => addIfMissing(a.petID, a.petName))
+  records.forEach((r) => addIfMissing(r.petID, r.petName))
+  vaccinations.forEach((v) => addIfMissing(v.petID, v.petName))
   return Array.from(map.entries()).map(([petID, name]) => ({ petID, name }))
 }
 
@@ -32,6 +41,7 @@ function isDueSoon(nextDueDate: string | null): boolean {
 }
 
 export default function OwnerDashboard() {
+  const [pets, setPets] = useState<PetReadDto[]>([])
   const [appointments, setAppointments] = useState<AppointmentReadDto[]>([])
   const [records, setRecords] = useState<MedicalRecordReadDto[]>([])
   const [vaccinations, setVaccinations] = useState<VaccinationReadDto[]>([])
@@ -44,12 +54,14 @@ export default function OwnerDashboard() {
       setIsLoading(true)
       setLoadError("")
       try {
-        const [appointmentsData, recordsData, vaccinationsData] = await Promise.all([
+        const [petsData, appointmentsData, recordsData, vaccinationsData] = await Promise.all([
+          petsService.getAll(),
           appointmentsService.getAll(),
           medicalRecordsService.getAll(),
           vaccinationsService.getAll(),
         ])
         if (!cancelled) {
+          setPets(petsData)
           setAppointments(appointmentsData)
           setRecords(recordsData)
           setVaccinations(vaccinationsData)
@@ -71,8 +83,8 @@ export default function OwnerDashboard() {
   }, [])
 
   const myPets = useMemo(
-    () => deriveMyPets(appointments, records, vaccinations),
-    [appointments, records, vaccinations]
+    () => buildMyPets(pets, appointments, records, vaccinations),
+    [pets, appointments, records, vaccinations]
   )
 
   const upcomingAppointments = useMemo(
