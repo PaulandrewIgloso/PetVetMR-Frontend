@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react"
 import { AppShell } from "@/components/layout/Appshell"
-import { Plus, Eye, X } from "lucide-react"
+import { Plus, Eye, X, Search } from "lucide-react"
 import { PetAvatar } from "@/components/shared/PetAvatar"
 import { Collapsible } from "@/components/ui/collapsible"
 import { medicalRecordsService } from "@/services/medicalRecords/medicalRecords.service"
@@ -35,6 +35,7 @@ export default function MedicalRecordsPage() {
   const [pets, setPets] = useState<PetReadDto[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
+  const [search, setSearch] = useState("")
 
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [expandedId, setExpandedId] = useState<number | null>(null)
@@ -90,6 +91,14 @@ export default function MedicalRecordsPage() {
     return map
   }, [pets])
 
+  // Case-insensitive, partial match on pet name. Runs only over the records the
+  // API already returned for this account, so owners never see other owners' records.
+  const searchTerm = search.trim().toLowerCase()
+  const filteredRecords = useMemo(() => {
+    if (!searchTerm) return records
+    return records.filter((r) => (r.petName ?? "").toLowerCase().includes(searchTerm))
+  }, [records, searchTerm])
+
   const addPrescription = () => {
     if (!rxDraft.trim()) return
     setPrescriptions((prev) => [...prev, rxDraft.trim()])
@@ -130,17 +139,38 @@ export default function MedicalRecordsPage() {
   return (
     <AppShell>
       <div className="space-y-4 p-4 sm:p-6 lg:p-8">
-        {isAdmin && (
-          <div className="flex justify-end">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="relative w-full sm:max-w-sm">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by pet name..."
+              aria-label="Search medical records by pet name"
+              className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-9 text-sm outline-none focus:ring-2 focus:ring-teal-500/40"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          {isAdmin && (
             <button
               onClick={() => setIsModalOpen(true)}
-              className="flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-teal-700 via-teal-600 to-green-500 px-4 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+              className="flex h-11 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-teal-700 via-teal-600 to-green-500 px-4 text-sm font-semibold text-white shadow-sm hover:opacity-90"
             >
               <Plus className="h-4 w-4" />
               New Record
             </button>
-          </div>
-        )}
+          )}
+        </div>
 
         {isLoading && <p className="text-sm text-slate-500">Loading records...</p>}
 
@@ -163,7 +193,7 @@ export default function MedicalRecordsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {records.map((r) => {
+                {filteredRecords.map((r) => {
                   const rx = prescriptionList(r.prescriptions)
                   return (
                     <Fragment key={r.recordID}>
@@ -223,7 +253,7 @@ export default function MedicalRecordsPage() {
 
             {/* Mobile: accordion cards */}
             <div className="divide-y md:hidden">
-              {records.map((r) => {
+              {filteredRecords.map((r) => {
                 const rx = prescriptionList(r.prescriptions)
                 return (
                   <Collapsible
@@ -276,6 +306,9 @@ export default function MedicalRecordsPage() {
 
             {records.length === 0 && (
               <p className="p-6 text-sm text-slate-500">No records yet.</p>
+            )}
+            {records.length > 0 && filteredRecords.length === 0 && (
+              <p className="p-6 text-sm text-slate-500">No matching records</p>
             )}
           </div>
         )}
